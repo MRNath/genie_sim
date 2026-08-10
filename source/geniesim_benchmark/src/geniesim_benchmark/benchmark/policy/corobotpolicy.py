@@ -32,6 +32,35 @@ _OPEN_TIMEOUT_SEC = 30
 _PING_INTERVAL_SEC = 20
 _PING_TIMEOUT_SEC = 60
 
+# FK EEF poses arrive as wxyz quaternions; scipy's from_quat takes xyzw. Older
+# scipy (bundled with some Isaac Sim images) lacks the `scalar_first=` kwarg,
+# so reorder explicitly instead.
+_WXYZ_TO_XYZW = [1, 2, 3, 0]
+
+
+def _transform_pose_to_frame(pose_xyzquat, tf_mat):
+    """Transform an EEF pose from base_link to arm_base_link.
+
+    Args:
+        pose_xyzquat: [x, y, z, qx, qy, qz, qw] in base_link (xyzw quaternion).
+        tf_mat: 4x4 homogeneous transform (arm_base_link -> base_link).
+            Inverted internally to apply the base_link -> arm_base_link direction.
+
+    Returns:
+        [x, y, z, qx, qy, qz, qw] in arm_base_link (xyzw quaternion).
+    """
+    inv_tf = np.eye(4)
+    inv_tf[:3, :3] = tf_mat[:3, :3].T
+    inv_tf[:3, 3] = -inv_tf[:3, :3] @ tf_mat[:3, 3]
+
+    pos_bl = np.asarray(pose_xyzquat[:3], dtype=np.float64)
+    rot_bl = R.from_quat(np.asarray(pose_xyzquat[3:7], dtype=np.float64)).as_matrix()
+
+    pos_abl = inv_tf[:3, :3] @ pos_bl + inv_tf[:3, 3]
+    rot_abl = inv_tf[:3, :3] @ rot_bl
+
+    return np.concatenate([pos_abl, R.from_matrix(rot_abl).as_quat()])
+
 
 class CoRobotPolicy(BasePolicy):
     def __init__(
@@ -177,6 +206,49 @@ class CoRobotPolicy(BasePolicy):
             head = []
         return arm, gripper, waist, head
 
+    def _build_end_pose(self, obs):
+        """Build the observed EEF poses in both base_link and arm_base_link.
+
+        FK gives the EEF in arm_base_link; `arm_base_transform` reframes it into
+        base_link, and both frames are shipped together so a server trained in
+        either one can read the frame it expects.
+
+        Returns None if eef or arm_base_transform is unavailable.
+        """
+        eef = obs.get("eef")
+        arm_base_tf = obs.get("arm_base_transform")
+        if eef is None or arm_base_tf is None:
+            return None
+
+        def _to_base_link(eef_wxyz):
+            pos_abl = np.asarray(eef_wxyz[:3], dtype=np.float64)
+            rot_abl = R.from_quat(np.asarray(eef_wxyz, dtype=np.float64)[3:7][_WXYZ_TO_XYZW]).as_matrix()
+            pos_bl = arm_base_tf[:3, :3] @ pos_abl + arm_base_tf[:3, 3]
+            rot_bl = arm_base_tf[:3, :3] @ rot_abl
+            return {
+                "position": pos_bl.tolist(),
+                "orientation": R.from_matrix(rot_bl).as_quat().tolist(),
+            }
+
+        def _to_arm_base_link(eef_wxyz):
+            # FK EEF is already in arm_base_link; just expose it (wxyz -> xyzw).
+            eef_arr = np.asarray(eef_wxyz, dtype=np.float64)
+            return {
+                "position": eef_arr[:3].tolist(),
+                "orientation": eef_arr[3:7][_WXYZ_TO_XYZW].tolist(),
+            }
+
+        return {
+            "base_link": {
+                "left_arm": _to_base_link(eef["left"]),
+                "right_arm": _to_base_link(eef["right"]),
+            },
+            "arm_base_link": {
+                "left_arm": _to_arm_base_link(eef["left"]),
+                "right_arm": _to_arm_base_link(eef["right"]),
+            },
+        }
+
     def need_infer(self):
         # Force a render either when a new inference is due, or one step ahead
         # of a history-capture step so the env produces fresh images for it.
@@ -259,6 +331,7 @@ class CoRobotPolicy(BasePolicy):
                     "arm_joint_states": arm_states,
                     "waist_joint_states": waist_states,
                     "gripper_states": gripper_states,
+                    "end_pose": self._build_end_pose(obs),
                 },
                 "prompt": task_instruction,
                 "robot_type": self._robot_type,
@@ -330,7 +403,7 @@ class CoRobotPolicy(BasePolicy):
     def _parse_result(result_dict):
         left_arm = result_dict.get("left_arm", {})
         right_arm = result_dict.get("right_arm", {})
-        waist = result_dict.get("waist", {})
+        waist = result_dict.get("waist") or {}
 
         left_arm_kind = left_arm.get("kind", "JOINT_ABS")
         right_arm_kind = right_arm.get("kind", "JOINT_ABS")
@@ -343,22 +416,51 @@ class CoRobotPolicy(BasePolicy):
         if left_arm_kind != right_arm_kind:
             raise ValueError(f"Left/right arm kind must match: left_arm={left_arm_kind}, right_arm={right_arm_kind}")
 
+        # Frame the server declares its EEF_ABS poses in; accepted per-arm or
+        # top-level. Absent means base_link (the historical assumption).
+        eef_frame = left_arm.get("base_link") or result_dict.get("base_link") or "base_link"
+        if eef_frame not in ("base_link", "arm_base_link"):
+            raise ValueError(f"Unsupported EEF frame: {eef_frame}")
+
         left_arm_vals = np.array(left_arm["values"])
         right_arm_vals = np.array(right_arm["values"])
 
         chunk = left_arm_vals.shape[0]
 
         def _get_optional(key):
+            """Read an optional per-step field (bare list or {"values": ...}).
+
+            A server that announces the key but ships nothing usable — empty
+            values, or fewer steps than the arm chunk — leaves that joint group
+            uncontrolled for the chunk instead of taking the episode down with
+            a KeyError/IndexError. Each degrade is logged so the gap is visible.
+            """
             raw = result_dict.get(key)
-            if raw is None or (isinstance(raw, dict) and not raw.get("values")):
+            if raw is None:
                 return None
-            arr = np.array(raw if not isinstance(raw, dict) else raw["values"])
-            return arr if arr.size > 0 else None
+            values = raw.get("values") if isinstance(raw, dict) else raw
+            arr = np.asarray(values) if values is not None else np.array([])
+            if arr.ndim == 0 or arr.size == 0:
+                logger.warning(f"Server returned '{key}' with no values; leaving {key} uncontrolled this chunk")
+                return None
+            if arr.shape[0] < chunk:
+                logger.warning(
+                    f"Server returned '{key}' with {arr.shape[0]} step(s) but the arm chunk is {chunk}; "
+                    f"leaving {key} uncontrolled this chunk"
+                )
+                return None
+            return arr
+
+        if "waist" in result_dict and not has_waist:
+            logger.warning(
+                f"Server returned 'waist' but it is unusable (kind={waist.get('kind')!r}); "
+                f"leaving waist uncontrolled this chunk"
+            )
 
         left_eff_vals = np.array(result_dict["left_effector"])
         right_eff_vals = np.array(result_dict["right_effector"])
         head_vals = _get_optional("head")
-        waist_vals = np.array(waist["values"]) if has_waist else None
+        waist_vals = _get_optional("waist") if has_waist else None
 
         actions = []
         for i in range(chunk):
@@ -366,6 +468,7 @@ class CoRobotPolicy(BasePolicy):
                 "arm": np.concatenate([left_arm_vals[i], right_arm_vals[i]]),
                 "gripper": np.concatenate([left_eff_vals[i], right_eff_vals[i]]),
                 "kind": left_arm_kind,
+                "eef_frame": eef_frame,
             }
             if head_vals is not None:
                 entry["head"] = head_vals[i]
@@ -374,12 +477,14 @@ class CoRobotPolicy(BasePolicy):
             actions.append(entry)
         return actions
 
-    def _post_process_action(self, raw_entry, cur_arm):
+    def _post_process_action(self, raw_entry, cur_arm, arm_base_tf=None):
         """Post-process action based on kind (JOINT_ABS or EEF_ABS).
 
         Args:
-            raw_entry: dict with "arm", "gripper", and "kind" keys
+            raw_entry: dict with "arm", "gripper", "kind" and "eef_frame" keys
             cur_arm: current arm joint states
+            arm_base_tf: 4x4 arm_base_link -> base_link transform, required to
+                reframe EEF_ABS actions declared in base_link
 
         Returns:
             Processed action dict with "arm", "gripper" keys
@@ -389,11 +494,20 @@ class CoRobotPolicy(BasePolicy):
         raw_gripper = raw_entry["gripper"]
 
         if kind == "EEF_ABS" and self._ikfk_solver is not None:
-            # Model EEF poses are already expressed in the arm_base_link frame
-            # the IK solver operates in ([x, y, z, qx, qy, qz, qw]), so they go
-            # straight to IK with no reframing.
-            left_eef = np.asarray(raw_arm[:7], dtype=np.float64)
-            right_eef = np.asarray(raw_arm[7:14], dtype=np.float64)
+            # Model EEF poses are [x, y, z, qx, qy, qz, qw]. IK solves in
+            # arm_base_link, so base_link poses need one transform;
+            # arm_base_link poses go straight through.
+            if raw_entry.get("eef_frame", "base_link") == "arm_base_link":
+                left_eef = np.asarray(raw_arm[:7], dtype=np.float64)
+                right_eef = np.asarray(raw_arm[7:14], dtype=np.float64)
+            elif arm_base_tf is not None:
+                left_eef = _transform_pose_to_frame(raw_arm[:7], arm_base_tf)
+                right_eef = _transform_pose_to_frame(raw_arm[7:14], arm_base_tf)
+            else:
+                raise RuntimeError(
+                    "EEF_ABS action declared in base_link but arm_base_transform is "
+                    "unavailable; cannot convert to the IK frame"
+                )
 
             left_xyzrpy = np.concatenate([left_eef[:3], R.from_quat(left_eef[3:7]).as_euler("xyz")])
             right_xyzrpy = np.concatenate([right_eef[:3], R.from_quat(right_eef[3:7]).as_euler("xyz")])
@@ -402,8 +516,6 @@ class CoRobotPolicy(BasePolicy):
             joint_action = self._ikfk_solver.eef_actions_to_joint([eef_action.tolist()], cur_arm, [0.0, 0.0])[0]
             arm = [float(v) for v in joint_action[: self._arm_dim]]
             gripper_raw = joint_action[self._arm_dim : self._arm_dim + self._gripper_dim]
-
-            logger.info(f"[EEF_ABS] IK result joints: {[round(v, 4) for v in arm]}")
         else:
             # JOINT_ABS: process directly
             action_flat = np.concatenate([raw_arm, raw_gripper])
@@ -415,6 +527,8 @@ class CoRobotPolicy(BasePolicy):
 
         result = {"arm": arm, "gripper": gripper}
 
+        if "head" in raw_entry:
+            result["head"] = [float(v) for v in raw_entry["head"]]
         if "waist" in raw_entry:
             result["waist"] = [float(v) for v in raw_entry["waist"]]
 
@@ -483,4 +597,5 @@ class CoRobotPolicy(BasePolicy):
 
         raw_entry = self.action_buffer.popleft()
         cur_arm = get_arm_states(observation["states"], self._arm_dim)
-        return self._post_process_action(raw_entry, cur_arm)
+        arm_base_tf = observation.get("arm_base_transform")
+        return self._post_process_action(raw_entry, cur_arm, arm_base_tf=arm_base_tf)

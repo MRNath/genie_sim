@@ -38,24 +38,6 @@ geniesim benchmark check-inference \
   --infer-host=<IP>:8999 --arch=corobot
 ```
 
-### Feed history image observations (server-driven, corobot)
-
-The `corobot` policy can attach a rolling buffer of past head-camera frames
-to each inference request under `params.history`, letting temporal models see
-what happened while the previous action chunk was replaying. This is **opt-in
-per response and controlled by the server** — nothing to configure on the
-benchmark side:
-
-- The server returns an integer `hist_frame_interval` in its `result`.
-  `> 0` enables capture and sets the sampling stride (a head frame is grabbed
-  every N chunk-replay steps); `0` / omitted disables it.
-- The captured frames ride along on the *next* request as
-  `params.history = {"interval": N, "images": [...]}`. The first request of an
-  episode (before the server has opted in) carries no history.
-
-A server that never returns the field behaves exactly as before, so this is
-backward compatible with existing inference servers.
-
 ### Discover tasks
 
 ```bash
@@ -88,6 +70,150 @@ episode subdirs — auto-detected at runtime. Pass
 `--lerobot-ref-dir <path>` to fill missing fisheye / head_back
 extrinsic columns from a reference dataset; omit it to leave those
 columns empty. Requires **ffmpeg on `PATH`** (RGB → HEVC, depth → PNG).
+
+---
+
+## 🔌 Inference interface (`corobot` policy)
+
+The benchmark talks to your inference server over a WebSocket, one msgpack
+request per action chunk. Two halves: the **observation** it sends and the
+**control** envelope it expects back.
+
+Authoritative source:
+[`benchmark/policy/corobotpolicy.py`](src/geniesim_benchmark/benchmark/policy/corobotpolicy.py)
+— `get_payload()` builds the request, `_parse_result()` / `_post_process_action()`
+consume the response.
+
+### Observation — what the benchmark sends
+
+```jsonc
+{
+  "method": "infer",
+  "params": {
+    "timestamps": { "head": <ns int>, "states": <ns int> },
+    "images": {                       // JPEG bytes; decode BGR then convert to RGB
+      "head":       { "encoding": "JPEG", "image_data": <bytes>, "height": <int>, "width": <int> },
+      "hand_left":  { ... },
+      "hand_right": { ... }
+    },
+    "states": {
+      "head_joint_states":  [ ... ],  // 0 dims on G2_omnipicker (`obs_extra_joints`)
+      "arm_joint_states":   [ ...14 ],// left_arm(7) + right_arm(7)
+      "waist_joint_states": [ ...5  ],
+      "gripper_states":     [ ...2  ],// [left, right]
+      "end_pose":           { ... }   // observed EEF pose, both frames — see below
+    },
+    "prompt":        "<natural-language task instruction>",
+    "robot_type":    "G2_omnipicker",
+    "task_name":     "<sub_task_name>",
+    "episode_idx":   0,
+    "episode_done":  false,
+    "task_progress": [ { "name": "...", "score": 0, "status": "PENDING" } ],
+    "history":       { "interval": <int>, "images": [ ... ] }   // optional, see below
+  }
+}
+```
+
+Joint dims follow the robot's entry in
+[`utils/name_utils.py`](src/geniesim_benchmark/utils/name_utils.py) (`ROBOT_CONFIGS`);
+the numbers above are `G2_omnipicker`.
+
+#### `states.end_pose` — EEF observation in **both** frames
+
+Forward kinematics gives the end-effector pose in `arm_base_link`; the runtime
+also reframes it into `base_link` and ships **both at once**, so a server
+trained in either frame reads the one it expects without any config:
+
+```jsonc
+"end_pose": {
+  "base_link":     { "left_arm": { "position": [x,y,z], "orientation": [qx,qy,qz,qw] },
+                     "right_arm": { ... } },
+  "arm_base_link": { "left_arm": { ... }, "right_arm": { ... } }
+}
+```
+
+Quaternions are **xyzw**. The `base_link` half is derived from the
+`arm_base_link → base_link` transform, re-read from the scene on every
+observation, so it stays correct as the torso/waist moves. The field is `null`
+when FK or that transform is unavailable (e.g. robots without IK config) —
+treat it as optional.
+
+#### `params.history` — rolling past frames (server-driven, opt-in)
+
+The policy can attach a buffer of past head-camera frames, letting temporal
+models see what happened while the previous action chunk was replaying. Nothing
+to configure on the benchmark side — **the server toggles it per response**:
+
+- Return an integer `hist_frame_interval` in your `result`. `> 0` enables
+  capture and sets the sampling stride (a head frame every N chunk-replay
+  steps); `0` / omitted disables it.
+- The captured frames ride along on the *next* request as
+  `params.history = {"interval": N, "images": [...]}`. The first request of an
+  episode (before the server has opted in) carries no history.
+
+A server that never returns the field behaves exactly as before.
+
+### Control — what your server returns
+
+```jsonc
+{
+  "result": {
+    "left_arm":  { "kind": "JOINT_ABS", "values": [[ ...7 ], ...H], "base_link": "base_link" },
+    "right_arm": { "kind": "JOINT_ABS", "values": [[ ...7 ], ...H], "base_link": "base_link" },
+    "left_effector":  [[ ...1 ], ...H],
+    "right_effector": [[ ...1 ], ...H],
+    "waist":  { "kind": "JOINT_ABS", "values": [[ ...5 ], ...H] },  // optional
+    "head":   [[ ... ], ...H],                                      // optional
+    "hist_frame_interval": 0                                        // optional
+  }
+}
+```
+
+`H` is the action horizon; the sim buffers the whole chunk and asks again when
+it drains. A top-level `{"error": "..."}` is treated as a fatal server error.
+
+**`kind`** — `left_arm.kind` and `right_arm.kind` must match:
+
+| `kind` | `values` per step | Meaning |
+|---|---|---|
+| `JOINT_ABS` | 7 joint positions | Absolute arm joint targets, applied directly |
+| `EEF_ABS` | `[x, y, z, qx, qy, qz, qw]` | Absolute EEF pose, IK-solved sim-side |
+
+**`base_link` — declaring the EEF control frame.** For `EEF_ABS`, this field
+names the frame your poses are expressed in. It is read per-arm
+(`left_arm.base_link`) with a top-level `result["base_link"]` fallback:
+
+| Value | Behavior |
+|---|---|
+| `"arm_base_link"` | Poses go straight to IK (which solves in this frame) |
+| `"base_link"` | Poses are transformed into `arm_base_link` first, using the live scene transform |
+| *absent* | Defaults to `"base_link"` |
+
+Any other value raises `ValueError`. Because the default is `base_link`, a
+server emitting `arm_base_link` poses **must declare the frame explicitly** —
+otherwise its poses get an unwanted transform applied. `JOINT_ABS` ignores the
+field entirely.
+
+**Optional `head` / `waist`.** Both are driven when you send them and simply
+left uncontrolled when you don't — omit the key and those joints hold their
+reset pose. To drive them, send a full `H`-step chunk (bare list or
+`{"kind", "values"}`; `waist` additionally needs `kind` `JOINT_ABS` or
+`ABS_JOINT`, both spellings accepted). Values are matched to the robot's
+`head_joints` / `waist_joints` in order, clamped to whichever is shorter.
+
+Announcing one of these keys without a usable payload — empty `values`, a
+missing `values`, `null`, or fewer steps than the arm chunk — is **not** an
+error: that group stays uncontrolled for the chunk and the runtime logs a
+warning naming the key and the reason, so a half-wired action head shows up in
+the log instead of killing the episode.
+
+**Other caveats:**
+
+- The response is unpacked with plain `msgpack` (`raw=False`), **not
+  `msgpack_numpy`**. Convert every array to native Python lists (`.tolist()`)
+  before packing, or `np.array(values)` breaks on ext-encoded garbage.
+- `EEF_ABS` in `base_link` requires the scene transform to be available; if the
+  runtime could not read it, the step raises rather than silently mis-solving.
 
 ---
 

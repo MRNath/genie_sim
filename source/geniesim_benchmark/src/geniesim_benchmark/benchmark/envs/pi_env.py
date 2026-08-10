@@ -15,22 +15,31 @@ logger = Logger()
 from geniesim_benchmark.benchmark.tasks.llm_task import LLMTask
 from geniesim_benchmark.utils.name_utils import *
 
+# Isaac reports link orientations as wxyz; scipy's from_quat takes xyzw. Older
+# scipy (bundled with some Isaac Sim images) lacks the `scalar_first=` kwarg,
+# so reorder explicitly instead.
+_WXYZ_TO_XYZW = [1, 2, 3, 0]
+
 
 class PiEnv(DummyEnv):
     def __init__(self, api_core, task_file: str, init_task_config, need_setup=True):
         super().__init__(api_core, task_file, init_task_config, need_setup)
+        # Joint groups the server commands but this robot_cfg can't drive;
+        # warned about once each rather than every step.
+        self._unusable_joint_groups = set()
         self.load_task_setup()
 
     def load_task_setup(self):
         self.task = LLMTask(self)
 
     def get_observation(self, fetch_images=True):
-        # C: single physics-loop round-trip for image + depth + joint_state,
-        # vs serial run_on_physics_loop waits before. B: when fetch_images is
-        # False (chunk replay between inferences) the policy won't consume
-        # images, so we skip them.
+        # C: single physics-loop round-trip for image + depth + joint_state
+        # + base/arm link poses, vs serial run_on_physics_loop waits before.
+        # B: when fetch_images is False (chunk replay between inferences) the
+        # policy won't consume images, so we skip them.
         bundle = self.data_courier.get_obs_bundle(
             fetch_images=fetch_images,
+            link_names=("base_link", "arm_base_link"),
         )
         images = bundle.get("images", {})
         # depth = bundle.get("depth", {})
@@ -56,7 +65,42 @@ class PiEnv(DummyEnv):
 
         obs = {"images": images, "states": states, "depth": None}
         obs["eef"] = self.ikfk_solver.compute_eef(self.cur_arm)
+        # FK EEF above is in arm_base_link; this transform lets the policy also
+        # express it in (and accept EEF actions in) base_link.
+        link_poses = bundle.get("link_poses") or {}
+        if "base_link" in link_poses and "arm_base_link" in link_poses:
+            try:
+                obs["arm_base_transform"] = self._arm_base_transform_from_poses(link_poses)
+            except Exception as e:
+                logger.warning(f"arm_base_transform unavailable: {e}")
         return obs
+
+    @staticmethod
+    def _arm_base_transform_from_poses(link_poses):
+        """Build the 4x4 arm_base_link -> base_link homogeneous transform.
+
+        `link_poses` values are (position, quaternion_wxyz) world poses.
+        """
+        base_pos, base_rot = link_poses["base_link"]
+        arm_pos, arm_rot = link_poses["arm_base_link"]
+
+        base_pos = np.asarray(base_pos, dtype=np.float64)
+        arm_pos = np.asarray(arm_pos, dtype=np.float64)
+        base_rot_wxyz = np.asarray(base_rot, dtype=np.float64)
+        arm_rot_wxyz = np.asarray(arm_rot, dtype=np.float64)
+
+        R_base = R.from_quat(base_rot_wxyz[_WXYZ_TO_XYZW]).as_matrix()
+        R_arm = R.from_quat(arm_rot_wxyz[_WXYZ_TO_XYZW]).as_matrix()
+
+        T_base = np.eye(4)
+        T_base[:3, :3] = R_base
+        T_base[:3, 3] = base_pos
+
+        T_arm = np.eye(4)
+        T_arm[:3, :3] = R_arm
+        T_arm[:3, 3] = arm_pos
+
+        return np.linalg.inv(T_base) @ T_arm
 
     def reset(self):
         self._followed_objects = set()
@@ -130,6 +174,7 @@ class PiEnv(DummyEnv):
         arm = action.get("arm")
         gripper = action.get("gripper")
         waist = action.get("waist")
+        head = action.get("head")
 
         batch = []
         if arm is not None:
@@ -137,8 +182,9 @@ class PiEnv(DummyEnv):
         if gripper is not None:
             batch.append(([float(v) for v in gripper], [self.robot_joint_indices[v] for v in self.cfg["gripper_joints"]], True))
         if waist is not None:
-            waist_joints = self.cfg["waist_joints"]
-            batch.append(([float(v) for v in waist], [self.robot_joint_indices[v] for v in waist_joints[:len(waist)]], True))
+            self._append_joint_target(batch, waist, self.cfg["waist_joints"], "waist")
+        if head is not None:
+            self._append_joint_target(batch, head, self.cfg["head_joints"], "head")
         if batch:
             self.api_core.set_joint_positions_batched(batch)
         # fmt: on
@@ -150,6 +196,26 @@ class PiEnv(DummyEnv):
 
         next_obs = self.get_observation(fetch_images=self.need_infer or self.has_done)
         return next_obs, self.has_done, need_update, self.task.task_progress
+
+    def _append_joint_target(self, batch, values, joint_names, label):
+        """Queue a joint-position target, pairing values with joints 1:1.
+
+        The action's width is whatever the inference server chose to send, so
+        clamp to the shorter of the two rather than handing the controller a
+        values/indices mismatch. A robot whose config declares no joints for
+        this group simply can't follow it — say so once instead of dropping the
+        command silently every step.
+        """
+        n = min(len(values), len(joint_names))
+        if n == 0:
+            if label not in self._unusable_joint_groups:
+                self._unusable_joint_groups.add(label)
+                logger.warning(
+                    f"Server sent a {label} action but robot_cfg declares no {label} joints; "
+                    f"leaving {label} uncontrolled"
+                )
+            return
+        batch.append(([float(v) for v in values[:n]], [self.robot_joint_indices[v] for v in joint_names[:n]], True))
 
     def _wait_arm_settled(self, target_arm):
         """Poll until arm joints converge to target (or timeout). Mirrors the

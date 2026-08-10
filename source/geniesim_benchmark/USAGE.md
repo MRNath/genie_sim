@@ -42,6 +42,24 @@ geniesim benchmark run g2op_if_pick_block_color --infer-host=<IP>:8999 \
 geniesim benchmark batch --category=if --robot=g2op
 ```
 
+## What your inference server must speak
+
+Full wire contract — observation in, control out — lives in
+[`README.md` § Inference interface](README.md#-inference-interface-corobot-policy).
+The short version:
+
+- **Observation** (`params`): three JPEG cameras (`head`, `hand_left`,
+  `hand_right`), joint states, the task `prompt`, and `states.end_pose` — the
+  observed EEF pose delivered in **both** `base_link` and `arm_base_link` at
+  once, so you read whichever frame your model was trained in.
+- **Control** (`result`): per-arm `{"kind", "values"}` action chunks.
+  `kind: "JOINT_ABS"` for joint targets, `kind: "EEF_ABS"` for EEF poses
+  (IK-solved sim-side). For `EEF_ABS`, declare your frame with
+  `"base_link": "base_link" | "arm_base_link"` — **it defaults to `base_link`**,
+  so `arm_base_link` poses must say so explicitly.
+- Pack arrays as native Python lists (`.tolist()`); the response is read with
+  plain `msgpack`, not `msgpack_numpy`.
+
 > 🖼️ **History image observations (corobot):** the runtime will feed a rolling
 > buffer of past head-camera frames back to your inference server whenever the
 > server opts in — return an integer `hist_frame_interval` in the response
