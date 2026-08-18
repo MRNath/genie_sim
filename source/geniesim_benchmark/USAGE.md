@@ -1,8 +1,8 @@
 # Run the Genie Sim Benchmark locally
 
 How to run a packaged benchmark task on your own machine against your own
-inference server — the same tasks and scoring contract used by the
-[AgiBot World Challenge: Open-Session](https://agibot-world.com/challenge/open-session/),
+inference server — the same tasks and scoring contract used by
+[RoboColiseum](https://robocoliseum.ai/),
 so a policy that passes locally behaves the same when scored remotely.
 
 Run everything **inside the Genie Sim Docker container** (`geniesim docker up` → `geniesim docker into`),
@@ -73,4 +73,4 @@ The short version:
 ## More
 
 - Task catalogue and scoring contract: [`README.md`](README.md)
-- Submit a debugged policy to the leaderboard: the agent-friendly one-click SKILLs under [`skills/agibot-world-challenge/`](skills/agibot-world-challenge/)
+- Submit a debugged policy to the leaderboard: the agent-friendly one-click SKILLs under [`skills/robocoliseum/`](skills/robocoliseum/)

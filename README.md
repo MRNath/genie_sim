@@ -90,21 +90,21 @@ The repo ships `AGENTS.md` + per-package `skills/<name>/SKILL.md` as machine-rea
 > Tier-2 peers (`geniesim_teleop` · `geniesim_generator` · `geniesim_world`) have heavy stacks (VR / LLM / CUDA-ML) and are **not** auto-installed.
 > Install with `pip install -e "source/geniesim/[teleop|generator|world|all]"` — or run `geniesim bootstrap` for an interactive re-install of the whole tree.
 
-### 3.2 🧪 Benchmark — debug locally, compete globally on the AgiBot World Challenge: Open-Session
+### 3.2 🧪 Benchmark — debug locally, compete globally on RoboColiseum
 
 ```mermaid
 flowchart LR
-  list(["📋 benchmark<br/>list / categories"]) ==> probe(["🔌 check-<br/>inference"]) ==> run(["🧪 benchmark<br/>run · batch"]) ==> submit(["🏆 Open-Session<br/>leaderboard"])
+  list(["📋 benchmark<br/>list / categories"]) ==> probe(["🔌 check-<br/>inference"]) ==> run(["🧪 benchmark<br/>run · batch"]) ==> submit(["🏆 RoboColiseum<br/>leaderboard"])
   classDef step fill:#ede9fe,stroke:#5b21b6,color:#3b0764,font-weight:bold
   class list,probe,run,submit step
   linkStyle 0,1,2 stroke:#5b21b6,stroke-width:2px
 ```
 
-The Genie Sim Benchmark is the engine behind the [**AgiBot World Challenge: Open-Session**](https://agibot-world.com/challenge/open-session/) — and the same tool you use to get ready for it:
+The Genie Sim Benchmark is the engine behind [**RoboColiseum**](https://robocoliseum.ai/) — and the same tool you use to get ready for it:
 
-- **🏆 It's a competition.** Open-Session ranks embodied-AI policies on four boards (`instruction` / `robust` / `manip` / `spatial`). The boards and their baseline scores are in the [Genie Sim Benchmark Leaderboard](#52--genie-sim-benchmark-leaderboard) below.
+- **🏆 It's a competition.** RoboColiseum ranks embodied-AI policies on four boards (`instruction` / `robust` / `manip` / `spatial`). The boards and their baseline scores are in the [Genie Sim Benchmark Leaderboard](#52--genie-sim-benchmark-leaderboard) below.
 - **🧪 Debug locally → submit remotely.** Run the benchmark tasks on your own machine to debug your policy against your own inference server, then launch a model evaluation on the official leaderboard with the _same_ server — no blind submissions.
-- **🤖 Agent-friendly one-click SKILLs.** The whole competition pipeline — download datasets, fetch the π<sub>0.5</sub> baseline weights, run an example leaderboard service, submit & track results — ships under [`source/geniesim_benchmark/skills/agibot-world-challenge/`](source/geniesim_benchmark/skills/agibot-world-challenge/); just ask an AI agent (Claude Code, Cursor, …) to drive them.
+- **🤖 Agent-friendly one-click SKILLs.** The whole competition pipeline — download datasets, fetch the π<sub>0.5</sub> baseline weights, run an example leaderboard service, submit & track results — ships under [`source/geniesim_benchmark/skills/robocoliseum/`](source/geniesim_benchmark/skills/robocoliseum/); just ask an AI agent (Claude Code, Cursor, …) to drive them.
 
 **Run it locally** — `cat source/geniesim_benchmark/USAGE.md` for how to run a benchmark task on your own machine against your inference server (CLI verbs, common commands, and overrides).
 
@@ -274,7 +274,7 @@ flowchart LR
 
 <details open><summary><b>[6/25/2026] v3.2.0 — Genie Sim RT Engine + Agentic CLI/SKILLs</b></summary>
 
-- 🏆 **AgiBot World Challenge: Open-Session** — opened the [AgiBot World Challenge: Open-Session](https://agibot-world.com/challenge/open-session/): submit a policy and get it scored on the official leaderboard. Added a new `spatial` board (alongside `instruction` / `robust` / `manip`), and the `robust` board now aggregates and scores tasks per perturbation type (instruction, robot pose, background, image quality, camera position). The full pipeline — download datasets, fetch baseline weights, run an example leaderboard service, submit & track — ships as agent-friendly one-click SKILLs under [`source/geniesim_benchmark/skills/agibot-world-challenge/`](source/geniesim_benchmark/skills/agibot-world-challenge/).
+- 🏆 **RoboColiseum** — opened [RoboColiseum](https://robocoliseum.ai/): submit a policy and get it scored on the official leaderboard. Added a new `spatial` board (alongside `instruction` / `robust` / `manip`), and the `robust` board now aggregates and scores tasks per perturbation type (instruction, robot pose, background, image quality, camera position). The full pipeline — download datasets, fetch baseline weights, run an example leaderboard service, submit & track — ships as agent-friendly one-click SKILLs under [`source/geniesim_benchmark/skills/robocoliseum/`](source/geniesim_benchmark/skills/robocoliseum/).
 - 🧞 **`geniesim` CLI** — one command for docker, ROS 2 builds, `bootstrap`, `status`, `doctor`, `deploy`; bash/zsh completion; standalone PEP 517 / PEP 621 wheel.
 - 🤖 **Agent SKILLs** — self-contained `SKILL.md` recipes (run-benchmark, check-inference, generate-scene, search-assets, deploy-generator, run-teleop) that Claude Code and other agents invoke to drive the simulator end-to-end.
 - ⚡ **Genie Sim RT Engine (realtime, interactive)** — `geniesim_ros` ships physics + render + robot as a first-class ROS 2 node sharing one `sim_time`. Multiple physics backends (Isaac Sim PhysX, Isaac Sim Newton, Kit-free Newton-standalone) with cloth / soft-body on the Newton path.
@@ -332,7 +332,7 @@ Please refer to these links to download assets and dataset:
 
 ## 5.2 🏆 Genie Sim Benchmark Leaderboard
 
-The four tables below are the **[AgiBot World Challenge: Open-Session](https://agibot-world.com/challenge/open-session/)** boards — `instruction`, `robust`, `manip`, `spatial` — reporting baseline scores for four reference models. The final **GenieSim-Sim2Real** table is not a competition board; it quantifies the simulation-to-reality fidelity of the benchmark. Each task is evaluated under a 2×2 design that crosses the training-data source (simulation vs. real) with the evaluation environment (simulation vs. real), yielding the sim-to-sim, real-to-sim, sim-to-real, and real-to-real conditions. The close agreement between corresponding simulated and physical success rates indicates that evaluation in Genie Sim is a faithful proxy for real-world evaluation.
+The four tables below are the **[RoboColiseum](https://robocoliseum.ai/)** boards — `instruction`, `robust`, `manip`, `spatial` — reporting baseline scores for four reference models. The final **GenieSim-Sim2Real** table is not a competition board; it quantifies the simulation-to-reality fidelity of the benchmark. Each task is evaluated under a 2×2 design that crosses the training-data source (simulation vs. real) with the evaluation environment (simulation vs. real), yielding the sim-to-sim, real-to-sim, sim-to-real, and real-to-real conditions. The close agreement between corresponding simulated and physical success rates indicates that evaluation in Genie Sim is a faithful proxy for real-world evaluation.
 
 Baseline model repositories:
 
