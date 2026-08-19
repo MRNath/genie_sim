@@ -1,7 +1,3 @@
-# Copyright (c) 2023-2026, AgiBot Inc. All Rights Reserved.
-# Author: Genie Sim Team
-# License: Mozilla Public License Version 2.0
-
 """
 Code that uses the hierarchical localization toolbox (hloc)
 to extract and match image features, estimate camera poses,

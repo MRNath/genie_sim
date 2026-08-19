@@ -1,7 +1,3 @@
-# Copyright (c) 2023-2026, AgiBot Inc. All Rights Reserved.
-# Author: Genie Sim Team
-# License: Mozilla Public License Version 2.0
-
 # # Copyright 2024 Yuehao Wang (https://github.com/yuehaowang). This part of code is borrowed form ["Bilateral Guided Radiance Field Processing"](https://bilarfpro.github.io/).
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
