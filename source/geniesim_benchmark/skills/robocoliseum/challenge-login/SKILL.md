@@ -13,7 +13,7 @@ The challenge API is gated by a JWT delivered as `Authorization: Bearer <token>`
 
 | Variable | Required | Notes |
 |----------|----------|-------|
-| `BASE_URL` | no | fixed default `http://120.92.88.78` (override only if explicitly told) |
+| `BASE_URL` | no | fixed default `https://robocoliseum.ai` (override only if explicitly told) |
 | `EMAIL` | for first login | contestant email |
 | `PASSWORD` | for first login | contestant password |
 | `CHALLENGE_TOKEN` | for refresh / current-user | existing JWT |
@@ -37,9 +37,9 @@ challenge_save_var() {
   export "$key=$val"
 }
 
-LOGIN_RESP=$(curl -fsS -G "$BASE_URL/api/challenge/login" \
-  --data-urlencode "email=$EMAIL" \
-  --data-urlencode "password=$PASSWORD")
+LOGIN_RESP=$(curl -fsS -X POST "$BASE_URL/api/challenge/login" \
+  -H "Content-Type: application/json" \
+  -d "{\"email\":\"$EMAIL\",\"password\":\"$PASSWORD\"}")
 
 STATUS=$(echo "$LOGIN_RESP" | jq -r '.status // "error"')
 TOKEN=$(echo  "$LOGIN_RESP" | jq -r '.token  // empty')
@@ -127,9 +127,9 @@ rm -f ~/.simubotix-challenge.env
 challenge_reset_job() {
   local f=~/.simubotix-challenge.env
   [ -f "$f" ] || return 0
-  awk '$0 !~ /^(JOB_ID|JOB_UUID|PARALLELISM|TUNNEL_ENDPOINT)=/' "$f" > "$f.tmp" && mv "$f.tmp" "$f"
+  awk '$0 !~ /^(JOB_ID|JOB_UUID|JOB_TOKEN|PARALLELISM|TUNNEL_ENDPOINT)=/' "$f" > "$f.tmp" && mv "$f.tmp" "$f"
   chmod 600 "$f"
-  unset JOB_ID JOB_UUID PARALLELISM TUNNEL_ENDPOINT
+  unset JOB_ID JOB_UUID JOB_TOKEN PARALLELISM TUNNEL_ENDPOINT
 }
 ```
 

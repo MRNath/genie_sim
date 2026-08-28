@@ -24,20 +24,20 @@ You are an AI assistant helping a contestant operate the **Simulation Challenge*
         └────────┬────────┘
                  ▼
        ┌────────────────────┐
-       │ challenge-submit-  │  POST /api/challenge/job  →  JOB_UUID, PARALLELISM, TUNNEL_ENDPOINT
-       │       job          │  (counts against the 4-submissions-per-day quota!)
-       └────────┬───────────┘
+       │ challenge-submit-  │  POST /api/challenge/job  →  JOB_ID (numeric), JOB_UUID,
+       │       job          │  PARALLELISM, TUNNEL_ENDPOINT, JOB_TOKEN
+       └────────┬───────────┘  (consumes a daily submission slot!)
                 ▼
         ┌────────────────────┐
         │ challenge-run-     │  ./scripts/tunnel.sh <gpu> <job_uuid> <endpoint>
-        │     agent          │  scale to PARALLELISM processes
+        │     agent          │  scale to PARALLELISM processes  (uses JOB_UUID)
         └────────┬───────────┘
                  ▼
        ┌────────────────────┐         ┌──────────────────────┐
        │ challenge-poll-    │ ──────▶ │ challenge-           │
-       │     result         │         │     troubleshoot     │  ← if Failed / stuck
+       │     result         │         │     troubleshoot     │  ← if failed / stuck
        └────────┬───────────┘         └──────────────────────┘
-                ▼
+                ▼   (uses JOB_ID)
         ┌────────────────────┐
         │ challenge-ranking  │  best-score + leaderboard
         └────────────────────┘
@@ -59,13 +59,16 @@ You are an AI assistant helping a contestant operate the **Simulation Challenge*
 
 ## Hard rules
 
-1. **Always confirm before** `challenge-submit-job` (each submission burns 1/4 daily quota) and before launching agent processes (they hold a `parallelism` slot).
+1. **Always confirm before** `challenge-submit-job` (each submission consumes one daily submission slot) and before launching agent processes (they hold a `parallelism` slot).
 2. **Read-only calls run without confirmation**: login, current-user-info, jobs/result/log, best-score, ranking, quota check.
-3. **The gateway host is fixed at `120.92.88.78` and does not change.** Defaults: `BASE_URL=http://120.92.88.78` (HTTP API base for all `curl "$BASE_URL/api/challenge/..."` calls) and `TUNNEL_ENDPOINT=ws://120.92.88.78/api/challenge/tunnel` (WebSocket tunnel for `tunnel.sh`/run-agent). If the job response carries a `tunnel_endpoint`, prefer it; otherwise fall back to the default above — do not block on it being absent.
-4. **`board` has a closed allowed-value set today.** `config.board` accepts exactly one of `instruction` / `spatial` / `manip` / `robust`. Any other value gets a 400 and burns quota. If the user proposes something else, stop and verify against `challenge-submit-job` Step 2 / `../user-manual.md` before POSTing. Do not invent.
+3. **The gateway host is fixed at `120.92.88.78` and does not change.** Defaults: `BASE_URL=https://robocoliseum.ai` (HTTP API base for all `curl "$BASE_URL/api/challenge/..."` calls) and `TUNNEL_ENDPOINT=ws://120.92.88.78/api/challenge/tunnel` (WebSocket tunnel for `tunnel.sh`/run-agent). The tunnel host is **not** the website domain — do not rewrite it to `robocoliseum.ai`. If the job response carries a `tunnel_endpoint`, prefer it; otherwise fall back to the default above — do not block on it being absent.
+4. **`board` has a closed allowed-value set today.** `config.board` accepts exactly one of `instruction` / `spatial` / `manip` / `robust`. Any other value gets a 400 and burns quota. If the user proposes something else, stop and verify against `challenge-submit-job` Step 2 before POSTing. Do not invent.
 5. If `CHALLENGE_TOKEN` is missing or returns `401`, jump to `challenge-login` first.
 6. **Auto-pilot does not skip confirmation gates.** If the user says "全程做完" / "do it end to end", you may merge the gates into a single up-front confirmation ("I'll submit job + launch K agents + poll until terminal — OK?"), but you may not run them silently. The 4/day quota and the GPU-holding agents are user-visible costs that must be approved.
 7. **4xx is a semantic rejection, never a network blip.** Do not retry a 400/401/403/404 just because the user says "可能是网络抖动" — only connection resets / 5xx / timeouts qualify as transient. Refer to `challenge-troubleshoot` for the exact response.
+8. **Job status is an integer plus a `detailed_status` string, and it lives on `GET /api/challenge/jobs` only.** `/job/{id}/result` returns `{tasks, total}` with no status field. Never write a poll loop that branches on `.status` from `/result` — it never terminates. See `challenge-poll-result`.
+9. **There is no official Simulation SDK package.** The supported client is the inference repo's `./scripts/tunnel.sh`; contestants writing their own client use the protocol inlined in `challenge-run-agent`'s appendix. Don't invent a `pip install` or point at platform-internal test clients.
+10. **Never quote the daily submission cap from memory.** It's a platform setting, not a fixed contest constant, and it has changed. Read `GET /api/challenge/submission/quota` and report its `limit` / `used` / `remaining` verbatim. If the probe fails, say the quota is unknown rather than guessing.
 
 ## Environment contract
 
@@ -75,10 +78,11 @@ These environment variables are the shared state between skills. Treat them as t
 
 | Variable | Producer | Consumers |
 |----------|----------|-----------|
-| `BASE_URL` | fixed default `http://120.92.88.78` (override only if explicitly told) | all |
+| `BASE_URL` | fixed default `https://robocoliseum.ai` (override only if explicitly told) | all |
 | `CHALLENGE_TOKEN` | `challenge-login` (writes state file) | all subsequent |
-| `JOB_ID` | `challenge-submit-job` (writes state file) | `challenge-poll-result` |
-| `JOB_UUID` | `challenge-submit-job` (writes state file) | `challenge-run-agent` |
+| `JOB_ID` | `challenge-submit-job` (writes state file) — numeric `.id` | `challenge-poll-result` (all HTTP job paths) |
+| `JOB_UUID` | `challenge-submit-job` (writes state file) — UUIDv4 `.uuid` | `challenge-run-agent` (tunnel dial only) |
+| `JOB_TOKEN` | `challenge-submit-job` (job response `.job_token`) | `challenge-run-agent` (tunnel dial credential) |
 | `PARALLELISM` | `challenge-submit-job` (writes state file) | `challenge-run-agent` |
 | `TUNNEL_ENDPOINT` | `challenge-submit-job` (job response), else fixed default `ws://120.92.88.78/api/challenge/tunnel` | `challenge-run-agent` |
 

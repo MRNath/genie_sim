@@ -18,8 +18,8 @@ metadata:
 
 This documents the **application-layer payload** the Simulation Challenge gateway (driven by the
 genie-sim simulator) exchanges with a contestant inference agent. The transport (reverse WebSocket
-tunnel, control frames, data-frame framing) is described in `challenge-run-agent` /
-`tunnel-protocol.zh-CN.md`; this skill covers only what goes **inside** the data-frame payload.
+tunnel, control frames, data-frame framing) is specified in the **appendix of
+`challenge-run-agent`**; this skill covers only what goes **inside** the data-frame payload.
 
 > The gateway treats the payload as opaque bytes. The schema below is defined by the genie-sim
 > client, not the gateway. **Authoritative source:**

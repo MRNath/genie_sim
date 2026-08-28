@@ -46,9 +46,13 @@ done
 ## Per-board leaderboard
 
 ```bash
-curl -fsS "$BASE_URL/api/challenge/leaderboard?board=instruction&page=1&per_page=20" \
+curl -fsS "$BASE_URL/api/challenge/leaderboard?board=instruction&page=1&per-page=20" \
   -H "Authorization: Bearer $CHALLENGE_TOKEN" | jq
 ```
+
+> **Query param is `per-page` with a hyphen** (`per_page` is silently ignored and you get the
+> default 20). The response envelope echoes it back as `per_page` — same asymmetry as
+> `/api/challenge/jobs`.
 
 Each row is one user's best job for that board. Optional query params: `sort` (default `score`), `order` (`asc` / `desc`, default `desc`), `q` (substring search over user / organization name).
 
@@ -83,9 +87,9 @@ Returns the platform-configured BibTeX string verbatim — surface as-is.
 
 ## Pagination
 
-If the user wants their own row and they're past page 1, walk pages until you hit their `name`. Keep `per_page` ≤ 100 to stay polite.
+If the user wants their own row and they're past page 1, walk pages until you hit their `name`. Keep `per-page` ≤ 100 to stay polite.
 
 ## Hand-off
 
-- User wants to improve their rank on a specific board → `challenge-submit-job` (mind the **4-submissions-per-day** quota; each board needs its own submission).
+- User wants to improve their rank on a specific board → `challenge-submit-job` (mind the daily submission quota — check `/api/challenge/submission/quota`; each board needs its own submission).
 - User wants their score for a specific recent submission → `challenge-poll-result`.
