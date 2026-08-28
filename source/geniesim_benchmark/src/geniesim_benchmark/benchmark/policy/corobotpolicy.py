@@ -284,8 +284,7 @@ class CoRobotPolicy(BasePolicy):
             images = apply_camera_image_augmentation(self._camera_dirt_cache, deepcopy(images), gen_config)
         if self.debug:
             self._dump_history_frame(images, len(self._history_buffer))
-        # History frames carry only the head camera to keep the buffer small.
-        self._history_buffer.append(self._encode_frame(images, ["head"]))
+        self._history_buffer.append(self._encode_frame(images))
 
     def _dump_history_frame(self, images, frame_idx):
         debug_dir = os.path.join(ROOT_DIR, "debug_history", f"chunk_{self.infer_cnt:04d}")
