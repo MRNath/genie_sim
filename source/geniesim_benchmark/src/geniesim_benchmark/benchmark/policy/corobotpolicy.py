@@ -11,7 +11,7 @@ from typing import Dict
 
 from .base import BasePolicy
 from geniesim_benchmark.plugins.logger import Logger
-from geniesim_benchmark.utils.comm.retry import run_with_inference_retry
+from geniesim_benchmark.utils.comm.retry import get_recv_timeout, run_with_inference_retry
 from geniesim_benchmark.utils.generalization_utils import apply_camera_image_augmentation
 from collections import deque
 import numpy as np
@@ -174,6 +174,11 @@ class CoRobotPolicy(BasePolicy):
         }
 
     @staticmethod
+    def _resize_half(image_rgb: np.ndarray) -> np.ndarray:
+        h, w = image_rgb.shape[:2]
+        return cv2.resize(image_rgb, (max(1, w // 2), max(1, h // 2)), interpolation=cv2.INTER_AREA)
+
+    @staticmethod
     def _encode_depth(depth_map: np.ndarray, scale: int) -> dict:
         depth = np.nan_to_num(depth_map, nan=0.0, posinf=0.0, neginf=0.0)
         depth = np.clip(depth * scale, 0, np.iinfo(np.uint16).max).astype(np.uint16)
@@ -284,7 +289,13 @@ class CoRobotPolicy(BasePolicy):
             images = apply_camera_image_augmentation(self._camera_dirt_cache, deepcopy(images), gen_config)
         if self.debug:
             self._dump_history_frame(images, len(self._history_buffer))
-        self._history_buffer.append(self._encode_frame(images))
+        # Hand cameras are higher-resolution than head; downscale only those
+        # to keep the history payload small over the network.
+        resized = {
+            cam: self._resize_half(img) if cam in ("left_hand", "right_hand") else img
+            for cam, img in images.items()
+        }
+        self._history_buffer.append(self._encode_frame(resized))
 
     def _dump_history_frame(self, images, frame_idx):
         debug_dir = os.path.join(ROOT_DIR, "debug_history", f"chunk_{self.infer_cnt:04d}")
@@ -546,7 +557,7 @@ class CoRobotPolicy(BasePolicy):
             data = msgpack.packb(payload)
             logger.info(f"Sending payload to server, size={len(data)} bytes")
             self._ws.send(data)
-            response = self._ws.recv()
+            response = self._ws.recv(timeout=get_recv_timeout())
             if isinstance(response, str):
                 raise RuntimeError(f"Server error: {response}")
             result = msgpack.unpackb(response, raw=False)
